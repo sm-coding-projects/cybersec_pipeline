@@ -6,7 +6,9 @@ The Docker socket is mounted into the backend and celery-worker containers.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import shlex
 from typing import Any
 
 import docker
@@ -47,37 +49,20 @@ class DockerManager:
     ) -> tuple[int, str]:
         """Execute a command inside a running container.
 
+        Runs the blocking docker-py ``exec_run`` call in a thread-pool executor
+        so the asyncio event loop is **never blocked**.  This enables true
+        concurrency when multiple tools run under ``asyncio.gather`` (e.g.
+        theHarvester + Amass in parallel during Phase 1).
+
+        ``asyncio.wait_for`` enforces the *timeout*; on expiry the process
+        inside the container is killed via ``pkill`` and a ``ToolExecutionError``
+        is raised so the pipeline can handle the failure gracefully.
+
         Returns ``(exit_code, combined_output)`` where *combined_output* is
-        stdout + stderr decoded as UTF-8.  Uses ``demux=True`` so that we can
-        cleanly separate the two streams and concatenate them.
+        stdout + stderr decoded as UTF-8.
         """
         try:
             container_obj = self.client.containers.get(container)
-
-            exec_kwargs: dict[str, Any] = {
-                "cmd": ["sh", "-c", command],
-                "demux": True,
-            }
-            if workdir is not None:
-                exec_kwargs["workdir"] = workdir
-
-            logger.debug("Exec in %s: %s", container, command)
-            exec_result = container_obj.exec_run(**exec_kwargs)
-
-            stdout = (exec_result.output[0] or b"").decode("utf-8", errors="replace")
-            stderr = (exec_result.output[1] or b"").decode("utf-8", errors="replace")
-            combined = stdout + stderr
-
-            if exec_result.exit_code != 0:
-                logger.warning(
-                    "Container %s command exited %d: %s",
-                    container,
-                    exec_result.exit_code,
-                    combined[-500:],
-                )
-
-            return exec_result.exit_code, combined
-
         except NotFound:
             raise ToolExecutionError(
                 tool=container,
@@ -88,6 +73,69 @@ class DockerManager:
                 tool=container,
                 message=f"Docker API error for '{container}': {exc}",
             )
+
+        exec_kwargs: dict[str, Any] = {
+            "cmd": ["sh", "-c", command],
+            "demux": True,
+        }
+        if workdir is not None:
+            exec_kwargs["workdir"] = workdir
+
+        logger.debug("Exec in %s: %s", container, command)
+        loop = asyncio.get_running_loop()
+
+        try:
+            exec_result = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: container_obj.exec_run(**exec_kwargs)),
+                timeout=float(timeout),
+            )
+        except asyncio.TimeoutError:
+            # Kill the timed-out process inside the container, then raise.
+            tool_binary = shlex.quote(command.split()[0].split("/")[-1])
+            logger.warning(
+                "exec_in_container timed out after %ds in '%s' — killing '%s'",
+                timeout,
+                container,
+                tool_binary,
+            )
+
+            async def _kill() -> None:
+                try:
+                    await loop.run_in_executor(
+                        None,
+                        lambda: container_obj.exec_run(
+                            cmd=["sh", "-c", f"pkill -9 -f {tool_binary} 2>/dev/null; true"],
+                            demux=False,
+                        ),
+                    )
+                except Exception:
+                    pass
+
+            asyncio.create_task(_kill())
+            raise ToolExecutionError(
+                tool=container,
+                message=f"Command timed out after {timeout}s: {command[:120]}",
+                exit_code=124,
+            )
+        except APIError as exc:
+            raise ToolExecutionError(
+                tool=container,
+                message=f"Docker API error for '{container}': {exc}",
+            )
+
+        stdout = (exec_result.output[0] or b"").decode("utf-8", errors="replace")
+        stderr = (exec_result.output[1] or b"").decode("utf-8", errors="replace")
+        combined = stdout + stderr
+
+        if exec_result.exit_code != 0:
+            logger.warning(
+                "Container %s command exited %d: %s",
+                container,
+                exec_result.exit_code,
+                combined[-500:],
+            )
+
+        return exec_result.exit_code, combined
 
     # ── Container status ─────────────────────────────────────────────────
 

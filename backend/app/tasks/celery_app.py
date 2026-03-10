@@ -79,37 +79,90 @@ async def _cleanup_zombie_scans() -> None:
 
             if not zombie_scans:
                 logger.info("Worker startup: no zombie scans found")
-                return
-
-            now = datetime.now(timezone.utc)
-            for scan in zombie_scans:
-                scan.status = ScanStatus.FAILED
-                scan.completed_at = now
-                scan.error_message = (
-                    "Pipeline interrupted: worker restarted while scan was in progress. "
-                    "Click Retry to run again."
-                )
-                # Also mark any running phases as failed
-                phase_result = await session.execute(
-                    select(ScanPhase).where(
-                        ScanPhase.scan_id == scan.id,
-                        ScanPhase.status == PhaseStatus.RUNNING,
+            else:
+                now = datetime.now(timezone.utc)
+                for scan in zombie_scans:
+                    scan.status = ScanStatus.FAILED
+                    scan.completed_at = now
+                    scan.error_message = (
+                        "Pipeline interrupted: worker restarted while scan was in progress. "
+                        "Click Retry to run again."
                     )
-                )
-                for phase in phase_result.scalars():
-                    phase.status = PhaseStatus.FAILED
-                    phase.completed_at = now
-                    phase.error_message = "Interrupted by worker restart"
+                    # Also mark any running phases as failed
+                    phase_result = await session.execute(
+                        select(ScanPhase).where(
+                            ScanPhase.scan_id == scan.id,
+                            ScanPhase.status == PhaseStatus.RUNNING,
+                        )
+                    )
+                    for phase in phase_result.scalars():
+                        phase.status = PhaseStatus.FAILED
+                        phase.completed_at = now
+                        phase.error_message = "Interrupted by worker restart"
 
-                logger.warning(
-                    "Worker startup: marked zombie scan %d (%s) as FAILED",
-                    scan.id,
-                    scan.target_domain,
-                )
+                    logger.warning(
+                        "Worker startup: marked zombie scan %d (%s) as FAILED",
+                        scan.id,
+                        scan.target_domain,
+                    )
 
-            await session.commit()
-            logger.info(
-                "Worker startup: cleaned up %d zombie scan(s)", len(zombie_scans)
-            )
+                await session.commit()
+                logger.info(
+                    "Worker startup: cleaned up %d zombie scan(s)", len(zombie_scans)
+                )
     finally:
         await db_engine.dispose()
+
+    # Kill any leftover tool processes that docker exec left running in containers
+    # after the previous worker was killed.  Ghost processes compete for CPU,
+    # network, and external API rate limits with the next legitimate scan.
+    _kill_stale_container_processes()
+
+
+def _kill_stale_container_processes() -> None:
+    """Kill leftover tool exec processes in all scan tool containers.
+
+    When the Celery worker is killed, any in-flight ``docker exec`` calls
+    leave orphan processes running inside the containers (docker exec does
+    NOT propagate SIGTERM/SIGKILL to the container process).  This function
+    runs once at startup to clean them up.
+    """
+    import docker as docker_sdk
+
+    # Map container name → primary binary to pkill.
+    # Using the tool binary name avoids killing the container's PID 1 (tail -f /dev/null).
+    container_tools = {
+        "amass": "amass",
+        "theharvester": "theHarvester",
+        "dnsx": "dnsx",
+        "nmap-scanner": "nmap",
+        "httpx": "httpx",
+        "nuclei": "nuclei",
+    }
+
+    try:
+        client = docker_sdk.DockerClient.from_env()
+    except Exception as exc:
+        logger.warning("Worker startup: could not connect to Docker to kill stale processes: %s", exc)
+        return
+
+    try:
+        for container_name, tool_binary in container_tools.items():
+            try:
+                container = client.containers.get(container_name)
+                if container.status != "running":
+                    continue
+                container.exec_run(
+                    cmd=["sh", "-c", f"pkill -9 -f {tool_binary} 2>/dev/null; true"],
+                    demux=False,
+                )
+                logger.debug("Worker startup: pkilled '%s' in container '%s'", tool_binary, container_name)
+            except Exception as exc:
+                logger.debug(
+                    "Worker startup: could not pkill in container '%s': %s", container_name, exc
+                )
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
