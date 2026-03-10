@@ -1,8 +1,7 @@
-"""Tests for the Amass output parser."""
+"""Tests for the Amass v4 plain-text output parser."""
 
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 
@@ -11,43 +10,36 @@ import pytest
 from app.pipeline.parsers.amass import AmassResult, parse_amass_output
 
 
-def _write_jsonl(lines: list[dict]) -> str:
-    """Write a list of dicts as JSONL to a temp file and return the path."""
-    fd, path = tempfile.mkstemp(suffix=".jsonl")
+def _write_txt(lines: list[str]) -> str:
+    """Write lines to a temp file and return the path."""
+    fd, path = tempfile.mkstemp(suffix=".txt")
     with os.fdopen(fd, "w") as f:
-        for line in lines:
-            f.write(json.dumps(line) + "\n")
+        f.write("\n".join(lines) + "\n")
     return path
 
 
 class TestParseAmassOutput:
     def test_valid_output(self) -> None:
-        data = [
-            {"name": "sub1.example.com", "addresses": [{"ip": "1.2.3.4"}]},
-            {"name": "sub2.example.com", "addresses": [{"ip": "5.6.7.8"}, {"ip": "9.10.11.12"}]},
-        ]
-        path = _write_jsonl(data)
+        path = _write_txt(["sub1.example.com", "sub2.example.com", "sub3.example.com"])
         try:
             result = parse_amass_output(path)
             assert isinstance(result, AmassResult)
-            assert len(result.subdomains) == 2
+            assert len(result.subdomains) == 3
             assert "sub1.example.com" in result.subdomains
-            assert len(result.ips) == 3
         finally:
             os.unlink(path)
 
-    def test_no_addresses(self) -> None:
-        data = [{"name": "sub.example.com"}]
-        path = _write_jsonl(data)
+    def test_no_ips_in_result(self) -> None:
+        """Amass v4 text output contains no IPs; ips field is always empty."""
+        path = _write_txt(["sub.example.com"])
         try:
             result = parse_amass_output(path)
-            assert len(result.subdomains) == 1
             assert result.ips == []
         finally:
             os.unlink(path)
 
     def test_empty_file(self) -> None:
-        fd, path = tempfile.mkstemp(suffix=".jsonl")
+        fd, path = tempfile.mkstemp(suffix=".txt")
         os.close(fd)
         try:
             result = parse_amass_output(path)
@@ -57,42 +49,40 @@ class TestParseAmassOutput:
             os.unlink(path)
 
     def test_file_not_found(self) -> None:
-        result = parse_amass_output("/nonexistent/file.jsonl")
+        result = parse_amass_output("/nonexistent/file.txt")
         assert isinstance(result, AmassResult)
         assert result.subdomains == []
 
-    def test_malformed_line_skipped(self) -> None:
-        fd, path = tempfile.mkstemp(suffix=".jsonl")
-        with os.fdopen(fd, "w") as f:
-            f.write('{"name": "good.example.com"}\n')
-            f.write("not valid json\n")
-            f.write('{"name": "also-good.example.com"}\n')
+    def test_blank_lines_skipped(self) -> None:
+        path = _write_txt(["sub1.example.com", "", "sub2.example.com", ""])
         try:
             result = parse_amass_output(path)
             assert len(result.subdomains) == 2
         finally:
             os.unlink(path)
 
-    def test_deduplication(self) -> None:
-        data = [
-            {"name": "sub.example.com", "addresses": [{"ip": "1.2.3.4"}]},
-            {"name": "SUB.EXAMPLE.COM", "addresses": [{"ip": "1.2.3.4"}]},
-        ]
-        path = _write_jsonl(data)
+    def test_comment_lines_skipped(self) -> None:
+        path = _write_txt(["# this is a comment", "sub.example.com"])
         try:
             result = parse_amass_output(path)
-            # Both should be lowercased and deduplicated
             assert len(result.subdomains) == 1
-            assert len(result.ips) == 1
+            assert "sub.example.com" in result.subdomains
         finally:
             os.unlink(path)
 
-    def test_addresses_as_strings(self) -> None:
-        """Some Amass versions emit addresses as plain strings."""
-        data = [{"name": "sub.example.com", "addresses": ["1.2.3.4", "5.6.7.8"]}]
-        path = _write_jsonl(data)
+    def test_deduplication(self) -> None:
+        path = _write_txt(["sub.example.com", "SUB.EXAMPLE.COM", "sub.example.com"])
         try:
             result = parse_amass_output(path)
-            assert len(result.ips) == 2
+            assert len(result.subdomains) == 1
+            assert result.subdomains[0] == "sub.example.com"
+        finally:
+            os.unlink(path)
+
+    def test_lowercased(self) -> None:
+        path = _write_txt(["SUB.EXAMPLE.COM"])
+        try:
+            result = parse_amass_output(path)
+            assert result.subdomains == ["sub.example.com"]
         finally:
             os.unlink(path)

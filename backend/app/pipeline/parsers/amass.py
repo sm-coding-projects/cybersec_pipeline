@@ -1,12 +1,12 @@
-"""Parser for Amass JSONL output.
+"""Parser for Amass v4 plain-text output.
 
-Amass outputs one JSON object per line.  Each line contains a ``name`` field
-(subdomain) and an ``addresses`` array with ``ip`` entries.
+Amass v4 removed the ``-json`` flag.  The ``-o <prefix>`` flag writes one
+subdomain per line to ``<prefix>.txt``.  IP addresses are no longer included
+in the enum output; resolution is handled downstream by dnsx.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 
@@ -22,53 +22,24 @@ class AmassResult:
 
 
 def parse_amass_output(filepath: str) -> AmassResult:
-    """Parse Amass JSONL output file into an ``AmassResult``.
+    """Parse Amass v4 plain-text output file into an ``AmassResult``.
 
-    Each line is expected to be a JSON object with at least a ``name`` field.
-    Malformed lines are skipped with a warning.
+    Each non-empty line is treated as a subdomain name.  Lines starting with
+    ``#`` are skipped.  Results are lowercased and deduplicated.
     """
     subdomains: set[str] = set()
-    ips: set[str] = set()
 
     try:
         with open(filepath, "r", encoding="utf-8") as fh:
-            for line_no, raw_line in enumerate(fh, start=1):
+            for raw_line in fh:
                 line = raw_line.strip()
-                if not line:
+                if not line or line.startswith("#"):
                     continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    logger.warning("Amass: skipping malformed line %d in %s", line_no, filepath)
-                    continue
-
-                if not isinstance(entry, dict):
-                    continue
-
-                # Subdomain name
-                name = entry.get("name", "")
-                if isinstance(name, str) and name.strip():
-                    subdomains.add(name.strip().lower())
-
-                # IP addresses from the 'addresses' array
-                addresses = entry.get("addresses", [])
-                if isinstance(addresses, list):
-                    for addr in addresses:
-                        if isinstance(addr, dict):
-                            ip = addr.get("ip", "")
-                            if isinstance(ip, str) and ip.strip():
-                                ips.add(ip.strip())
-                        elif isinstance(addr, str) and addr.strip():
-                            ips.add(addr.strip())
-
+                subdomains.add(line.lower())
     except FileNotFoundError:
         logger.warning("Amass output file not found: %s", filepath)
         return AmassResult()
 
-    result = AmassResult(subdomains=sorted(subdomains), ips=sorted(ips))
-    logger.info(
-        "Parsed Amass output: %d subdomains, %d IPs",
-        len(result.subdomains),
-        len(result.ips),
-    )
+    result = AmassResult(subdomains=sorted(subdomains))
+    logger.info("Parsed Amass output: %d subdomains", len(result.subdomains))
     return result

@@ -116,19 +116,21 @@ async def run_amass(
 ) -> AmassResult:
     """Run Amass passive enumeration and return parsed results.
 
-    Command: ``amass enum -d {domain} -timeout {timeout} -json {output_file}``
-    Output: JSONL file at ``{results_dir}/phase1_recon/amass.json``
+    Command: ``amass enum -passive -d {domain} -timeout {timeout} -o {output_prefix}``
+    Output: plain-text file at ``{results_dir}/phase1_recon/amass.txt`` (one subdomain per line).
+    Amass v4 removed the ``-json`` flag; IP resolution is handled downstream by dnsx.
     """
     await emitter.emit("tool_started", {"tool": "amass"})
 
     domain = config["target_domain"]
     timeout = config.get("amass_timeout", 15)
     phase_dir = f"{results_dir}/phase1_recon"
-    output_file = f"{phase_dir}/amass.json"
+    output_prefix = f"{phase_dir}/amass"
+    output_file = f"{phase_dir}/amass.txt"
 
     await docker.exec_in_container("amass", f"mkdir -p {phase_dir}")
 
-    command = f"amass enum -passive -d {domain} -timeout {timeout} -json {output_file}"
+    command = f"amass enum -passive -d {domain} -timeout {timeout} -o {output_prefix}"
     exit_code, output = await retry_tool_exec(
         docker=docker,
         container="amass",
@@ -155,7 +157,7 @@ async def run_amass(
 
     # Read and parse output
     try:
-        raw_jsonl = await docker.read_file_from_container("amass", output_file)
+        raw_text = await docker.read_file_from_container("amass", output_file)
     except ToolExecutionError:
         logger.warning("Could not read Amass output from %s", output_file)
         return AmassResult()
@@ -163,8 +165,8 @@ async def run_amass(
     import tempfile
     import os
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
-        tmp.write(raw_jsonl)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
+        tmp.write(raw_text)
         tmp_path = tmp.name
 
     try:
