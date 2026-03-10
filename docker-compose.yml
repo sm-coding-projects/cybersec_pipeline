@@ -1,0 +1,386 @@
+# docker-compose.yml — CyberSec Pipeline Web Application
+
+services:
+
+  # ======== APPLICATION ========
+
+  # Nginx reverse proxy — serves frontend static files, proxies API and WebSocket
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - frontend_build:/usr/share/nginx/html:ro
+    networks:
+      - cybersec-net
+    depends_on:
+      backend:
+        condition: service_started
+      frontend-builder:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # FastAPI backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://cybersec:${DB_PASSWORD:-changeme_app_db}@app-db:5432/cybersec
+      REDIS_URL: redis://app-redis:6379/0
+      CELERY_BROKER_URL: redis://app-redis:6379/0
+      CELERY_RESULT_BACKEND: redis://app-redis:6379/1
+      DEFECTDOJO_URL: http://defectdojo-nginx:8080
+      DEFECTDOJO_API_KEY: ${DEFECTDOJO_API_KEY:-}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-changeme_jwt_secret_at_least_32_chars}
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - shared_results:/results
+    networks:
+      - cybersec-net
+    depends_on:
+      app-db:
+        condition: service_healthy
+      app-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+
+  # Celery worker — runs scan pipeline tasks
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: celery-worker
+    restart: unless-stopped
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=4
+    environment:
+      DATABASE_URL: postgresql+asyncpg://cybersec:${DB_PASSWORD:-changeme_app_db}@app-db:5432/cybersec
+      REDIS_URL: redis://app-redis:6379/0
+      CELERY_BROKER_URL: redis://app-redis:6379/0
+      CELERY_RESULT_BACKEND: redis://app-redis:6379/1
+      DEFECTDOJO_URL: http://defectdojo-nginx:8080
+      DEFECTDOJO_API_KEY: ${DEFECTDOJO_API_KEY:-}
+      DOCKER_HOST: unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - shared_results:/results
+    networks:
+      - cybersec-net
+    depends_on:
+      app-db:
+        condition: service_healthy
+      app-redis:
+        condition: service_healthy
+
+  # Celery beat — scheduled tasks (template updates, cleanup)
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: celery-beat
+    restart: unless-stopped
+    command: celery -A app.tasks.celery_app beat --loglevel=info
+    environment:
+      DATABASE_URL: postgresql+asyncpg://cybersec:${DB_PASSWORD:-changeme_app_db}@app-db:5432/cybersec
+      REDIS_URL: redis://app-redis:6379/0
+      CELERY_BROKER_URL: redis://app-redis:6379/0
+      CELERY_RESULT_BACKEND: redis://app-redis:6379/1
+    networks:
+      - cybersec-net
+    depends_on:
+      app-db:
+        condition: service_healthy
+      app-redis:
+        condition: service_healthy
+
+  # Frontend build stage — produces static files for Nginx to serve
+  frontend-builder:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: frontend-builder
+    volumes:
+      - frontend_build:/app/dist
+
+  # Application database
+  app-db:
+    image: postgres:16-alpine
+    container_name: app-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cybersec
+      POSTGRES_USER: cybersec
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme_app_db}
+    volumes:
+      - app_db_data:/var/lib/postgresql/data
+    networks:
+      - cybersec-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cybersec -d cybersec"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Application Redis — Celery broker + WebSocket pub/sub
+  app-redis:
+    image: redis:7-alpine
+    container_name: app-redis
+    restart: unless-stopped
+    networks:
+      - cybersec-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ======== SECURITY TOOLS ========
+
+  theharvester:
+    build:
+      context: ./containers/theharvester
+      dockerfile: Dockerfile
+    container_name: theharvester
+    restart: "no"
+    volumes:
+      - shared_results:/results
+    networks:
+      - cybersec-net
+    entrypoint: ["tail", "-f", "/dev/null"]
+
+  amass:
+    image: caffix/amass:latest
+    container_name: amass
+    restart: "no"
+    volumes:
+      - shared_results:/results
+      - amass_data:/root/.config/amass
+    networks:
+      - cybersec-net
+    entrypoint: ["tail", "-f", "/dev/null"]
+
+  dnsx:
+    image: projectdiscovery/dnsx:latest
+    container_name: dnsx
+    restart: "no"
+    volumes:
+      - shared_results:/results
+    networks:
+      - cybersec-net
+    entrypoint: ["tail", "-f", "/dev/null"]
+
+  nmap-scanner:
+    build:
+      context: ./containers/nmap-scanner
+      dockerfile: Dockerfile
+    container_name: nmap-scanner
+    restart: "no"
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    volumes:
+      - shared_results:/results
+    networks:
+      - cybersec-net
+    entrypoint: ["tail", "-f", "/dev/null"]
+
+  httpx:
+    image: projectdiscovery/httpx:latest
+    container_name: httpx
+    restart: "no"
+    volumes:
+      - shared_results:/results
+    networks:
+      - cybersec-net
+    entrypoint: ["tail", "-f", "/dev/null"]
+
+  nuclei:
+    image: projectdiscovery/nuclei:latest
+    container_name: nuclei
+    restart: "no"
+    volumes:
+      - shared_results:/results
+      - nuclei_templates:/root/nuclei-templates
+    networks:
+      - cybersec-net
+    entrypoint: ["tail", "-f", "/dev/null"]
+
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    container_name: zap
+    restart: unless-stopped
+    volumes:
+      - shared_results:/results
+      - zap_data:/zap/wrk
+    networks:
+      - cybersec-net
+    command: >
+      zap.sh -daemon
+      -host 0.0.0.0
+      -port 8090
+      -config api.addrs.addr.name=.*
+      -config api.addrs.addr.regex=true
+      -config api.disablekey=true
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8090/JSON/core/view/version/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ======== DEFECTDOJO ========
+
+  defectdojo-web:
+    image: defectdojo/defectdojo-django:latest
+    container_name: defectdojo-web
+    restart: unless-stopped
+    environment:
+      DD_DATABASE_ENGINE: django.db.backends.postgresql
+      DD_DATABASE_HOST: defectdojo-db
+      DD_DATABASE_PORT: "5432"
+      DD_DATABASE_NAME: defectdojo
+      DD_DATABASE_USER: defectdojo
+      DD_DATABASE_PASSWORD: ${DD_DATABASE_PASSWORD:-changeme_dd_db}
+      DD_SECRET_KEY: ${DD_SECRET_KEY:-changeme_secret_key_at_least_50_chars_long_12345678}
+      DD_CREDENTIAL_AES_256_KEY: ${DD_CREDENTIAL_AES_256_KEY:-changeme_aes_key_needs_to_be32}
+      DD_ALLOWED_HOSTS: "*"
+      DD_CELERY_BROKER_URL: redis://defectdojo-redis:6379/0
+    volumes:
+      - defectdojo_media:/app/media
+    networks:
+      cybersec-net:
+        aliases:
+          - uwsgi
+    depends_on:
+      defectdojo-db:
+        condition: service_healthy
+      defectdojo-redis:
+        condition: service_started
+
+  defectdojo-celery-beat:
+    image: defectdojo/defectdojo-django:latest
+    container_name: defectdojo-celery-beat
+    restart: unless-stopped
+    command: celery --app=dojo beat --loglevel=INFO
+    environment:
+      DD_DATABASE_ENGINE: django.db.backends.postgresql
+      DD_DATABASE_HOST: defectdojo-db
+      DD_DATABASE_PORT: "5432"
+      DD_DATABASE_NAME: defectdojo
+      DD_DATABASE_USER: defectdojo
+      DD_DATABASE_PASSWORD: ${DD_DATABASE_PASSWORD:-changeme_dd_db}
+      DD_SECRET_KEY: ${DD_SECRET_KEY:-changeme_secret_key_at_least_50_chars_long_12345678}
+      DD_CREDENTIAL_AES_256_KEY: ${DD_CREDENTIAL_AES_256_KEY:-changeme_aes_key_needs_to_be32}
+      DD_CELERY_BROKER_URL: redis://defectdojo-redis:6379/0
+    networks:
+      - cybersec-net
+    depends_on:
+      defectdojo-db:
+        condition: service_healthy
+      defectdojo-redis:
+        condition: service_started
+
+  defectdojo-celery-worker:
+    image: defectdojo/defectdojo-django:latest
+    container_name: defectdojo-celery-worker
+    restart: unless-stopped
+    command: celery --app=dojo worker --loglevel=INFO --concurrency=2
+    environment:
+      DD_DATABASE_ENGINE: django.db.backends.postgresql
+      DD_DATABASE_HOST: defectdojo-db
+      DD_DATABASE_PORT: "5432"
+      DD_DATABASE_NAME: defectdojo
+      DD_DATABASE_USER: defectdojo
+      DD_DATABASE_PASSWORD: ${DD_DATABASE_PASSWORD:-changeme_dd_db}
+      DD_SECRET_KEY: ${DD_SECRET_KEY:-changeme_secret_key_at_least_50_chars_long_12345678}
+      DD_CREDENTIAL_AES_256_KEY: ${DD_CREDENTIAL_AES_256_KEY:-changeme_aes_key_needs_to_be32}
+      DD_CELERY_BROKER_URL: redis://defectdojo-redis:6379/0
+    networks:
+      - cybersec-net
+    depends_on:
+      defectdojo-db:
+        condition: service_healthy
+      defectdojo-redis:
+        condition: service_started
+
+  defectdojo-nginx:
+    image: defectdojo/defectdojo-nginx:latest
+    container_name: defectdojo-nginx
+    restart: unless-stopped
+    networks:
+      - cybersec-net
+    depends_on:
+      - defectdojo-web
+
+  defectdojo-db:
+    image: postgres:16-alpine
+    container_name: defectdojo-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: defectdojo
+      POSTGRES_USER: defectdojo
+      POSTGRES_PASSWORD: ${DD_DATABASE_PASSWORD:-changeme_dd_db}
+    volumes:
+      - defectdojo_db_data:/var/lib/postgresql/data
+    networks:
+      - cybersec-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U defectdojo -d defectdojo"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  defectdojo-redis:
+    image: redis:7-alpine
+    container_name: defectdojo-redis
+    restart: unless-stopped
+    networks:
+      - cybersec-net
+
+  # ======== VISUALIZATION ========
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-changeme_grafana}
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - cybersec-net
+
+volumes:
+  app_db_data:
+  frontend_build:
+  shared_results:
+  amass_data:
+  nuclei_templates:
+  zap_data:
+  defectdojo_media:
+  defectdojo_db_data:
+  grafana_data:
+
+networks:
+  cybersec-net:
+    driver: bridge
