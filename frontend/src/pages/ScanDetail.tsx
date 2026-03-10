@@ -84,10 +84,13 @@ export default function ScanDetail() {
   // Determine current phase from WebSocket or REST
   const currentPhase = scanData.current_phase || scan.current_phase || 1;
 
-  // Merge tool statuses from REST + WS
-  const currentRestPhase = scan.phases.find((p) => p.phase_number === currentPhase);
+  // Merge tool statuses from ALL REST phases + WS live data
+  const allRestToolStatuses: Record<string, string> = {};
+  for (const phase of scan.phases) {
+    Object.assign(allRestToolStatuses, phase.tool_statuses || {});
+  }
   const mergedToolStatuses: Record<string, string> = {
-    ...(currentRestPhase?.tool_statuses || {}),
+    ...allRestToolStatuses,
     ...scanData.tool_statuses,
   };
 
@@ -209,6 +212,7 @@ export default function ScanDetail() {
         <div className="lg:col-span-2">
           <PhaseCard
             phaseNumber={currentPhase}
+            phaseStatus={phaseStates[currentPhase]?.status}
             toolStatuses={mergedToolStatuses}
             toolResults={scanData.tool_results}
           />

@@ -43,10 +43,40 @@ class EventEmitter:
     forwards events to connected browsers.
     """
 
-    def __init__(self, scan_id: int) -> None:
+    # Events that represent a tool status transition
+    _TOOL_STATUS_EVENTS: dict[str, str] = {
+        "tool_started": "running",
+        "tool_completed": "completed",
+        "tool_error": "error",
+        "tool_skipped": "skipped",
+    }
+
+    def __init__(
+        self,
+        scan_id: int,
+        db_session_factory: async_sessionmaker[AsyncSession] | None = None,
+    ) -> None:
         self.scan_id = scan_id
         self.channel = f"scan_events:{scan_id}"
         self._redis: aioredis.Redis | None = None
+        # In-memory tracking of tool statuses for the current phase
+        self.tool_statuses: dict[str, str] = {}
+        # DB session factory for persisting tool statuses mid-phase so that
+        # the REST API always reflects live state (not just on phase completion)
+        self._db_session_factory = db_session_factory
+        # Live state snapshot persisted to Redis so late-joining WS clients
+        # can receive a full picture of what has happened so far.
+        # Includes rolling log buffer so logs survive navigation.
+        self._live_state: dict[str, Any] = {
+            "current_phase": 0,
+            "phase_statuses": {},
+            "tool_statuses": {},
+            "logs": [],
+        }
+
+    def reset_tool_statuses(self) -> None:
+        """Reset tool status tracking between phases."""
+        self.tool_statuses = {}
 
     async def _get_redis(self) -> aioredis.Redis:
         if self._redis is None:
@@ -55,16 +85,87 @@ class EventEmitter:
 
     async def emit(self, event: str, data: dict[str, Any] | None = None) -> None:
         """Publish an event to the scan's Redis pub/sub channel."""
-        message = json.dumps({
-            "event": event,
-            "data": data or {},
-        })
+        data = data or {}
+        is_tool_status_event = event in self._TOOL_STATUS_EVENTS and "tool" in data
+
+        # Track tool status transitions in memory so engine can persist them
+        if is_tool_status_event:
+            self.tool_statuses[data["tool"]] = self._TOOL_STATUS_EVENTS[event]
+
+        # Update live state snapshot so late-joining WS clients get current state
+        self._update_live_state(event, data)
+
+        message = json.dumps({"event": event, "data": data})
         try:
             r = await self._get_redis()
             await r.publish(self.channel, message)
+            # Persist live snapshot; 24h TTL covers any reasonable scan duration
+            await r.set(
+                f"scan_live_state:{self.scan_id}",
+                json.dumps(self._live_state),
+                ex=86400,
+            )
             logger.debug("Emitted event %s on %s", event, self.channel)
         except Exception:
             logger.warning("Failed to emit event %s for scan %d", event, self.scan_id, exc_info=True)
+
+        # Persist tool statuses to DB on every tool status transition so that
+        # the REST API (/scans/{id}) always reflects current live state.
+        # This is the reliable path: works even if Redis snapshot is absent.
+        if is_tool_status_event and self._db_session_factory is not None:
+            try:
+                await self._persist_tool_statuses_to_db()
+            except Exception:
+                logger.warning(
+                    "Failed to persist tool statuses to DB for scan %d", self.scan_id, exc_info=True
+                )
+
+    def _update_live_state(self, event: str, data: dict[str, Any]) -> None:
+        """Update the in-memory live state snapshot (persisted to Redis in emit)."""
+        if event in self._TOOL_STATUS_EVENTS and "tool" in data:
+            self._live_state["tool_statuses"][data["tool"]] = self._TOOL_STATUS_EVENTS[event]
+        elif event == "phase_started":
+            phase_num = data.get("phase_number", 0)
+            self._live_state["current_phase"] = phase_num
+            self._live_state["phase_statuses"][str(phase_num)] = "running"
+        elif event == "phase_completed":
+            phase_num = data.get("phase_number", 0)
+            self._live_state["phase_statuses"][str(phase_num)] = "completed"
+        elif event == "phase_failed":
+            phase_num = data.get("phase_number", 0)
+            self._live_state["phase_statuses"][str(phase_num)] = "failed"
+        elif event == "tool_log":
+            ts = int(datetime.now(timezone.utc).timestamp() * 1000)
+            logs: list = self._live_state["logs"]
+            logs.append({
+                "tool": data.get("tool", ""),
+                "line": data.get("line", ""),
+                "timestamp": ts,
+            })
+            # Keep only the most recent 200 lines to bound Redis key size
+            if len(logs) > 200:
+                self._live_state["logs"] = logs[-200:]
+
+    async def _persist_tool_statuses_to_db(self) -> None:
+        """Write current tool_statuses to the running phase's DB record.
+
+        Called on every tool status event so the REST API is always up-to-date.
+        Without this, tool_statuses would only be written at phase completion,
+        leaving the running phase with an empty dict while it executes.
+        """
+        if self._db_session_factory is None:
+            return
+        async with self._db_session_factory() as session:
+            result = await session.execute(
+                select(ScanPhase).where(
+                    ScanPhase.scan_id == self.scan_id,
+                    ScanPhase.status == PhaseStatus.RUNNING,
+                )
+            )
+            phase = result.scalar_one_or_none()
+            if phase is not None:
+                phase.tool_statuses = dict(self.tool_statuses)
+                await session.commit()
 
     async def close(self) -> None:
         """Close the underlying Redis connection."""
@@ -89,7 +190,7 @@ class PipelineEngine:
         self.scan_id = scan_id
         self.db_session_factory = db_session_factory
         self.docker = DockerManager()
-        self.emitter = EventEmitter(scan_id)
+        self.emitter = EventEmitter(scan_id, db_session_factory=db_session_factory)
         self._cancel_redis: aioredis.Redis | None = None
 
     # ── Main entry point ──────────────────────────────────────────────
@@ -170,7 +271,8 @@ class PipelineEngine:
                         scan_id=self.scan_id,
                     )
 
-                    await self._complete_phase(phase_record)
+                    await self._complete_phase(phase_record, self.emitter.tool_statuses)
+                    self.emitter.reset_tool_statuses()
                     await self.emitter.emit("phase_completed", {
                         "phase_number": phase_number,
                         "phase_name": phase_name,
@@ -400,8 +502,10 @@ class PipelineEngine:
             await session.refresh(phase_record)
             return phase_record
 
-    async def _complete_phase(self, phase_record: ScanPhase) -> None:
-        """Mark a phase as completed."""
+    async def _complete_phase(
+        self, phase_record: ScanPhase, tool_statuses: dict[str, str] | None = None
+    ) -> None:
+        """Mark a phase as completed and persist tool statuses."""
         async with self.db_session_factory() as session:
             result = await session.execute(
                 select(ScanPhase).where(ScanPhase.id == phase_record.id)
@@ -414,6 +518,8 @@ class PipelineEngine:
             if phase.started_at:
                 delta = phase.completed_at - phase.started_at
                 phase.duration_seconds = delta.total_seconds()
+            if tool_statuses:
+                phase.tool_statuses = tool_statuses
             await session.commit()
             # Update in-memory record for the event
             phase_record.duration_seconds = phase.duration_seconds

@@ -88,6 +88,32 @@ export function useWebSocket({
       const { event, data } = wsEvent;
 
       switch (event) {
+        case "state_snapshot": {
+          // Initial snapshot sent by the server when a WS client connects mid-scan.
+          // Restores phase/tool statuses and recent logs so the UI is immediately
+          // accurate after a navigation away and back.
+          if (typeof data.current_phase === "number" && data.current_phase > 0) {
+            next.current_phase = data.current_phase;
+          }
+          if (data.phase_statuses && typeof data.phase_statuses === "object") {
+            const ps = data.phase_statuses as Record<string, string>;
+            for (const [k, v] of Object.entries(ps)) {
+              next.phase_statuses[parseInt(k, 10)] = v;
+            }
+          }
+          if (data.tool_statuses && typeof data.tool_statuses === "object") {
+            next.tool_statuses = {
+              ...next.tool_statuses,
+              ...(data.tool_statuses as Record<string, string>),
+            };
+          }
+          if (Array.isArray(data.logs)) {
+            // Pre-populate log stream; new tool_log events will be appended on top
+            next.logs = data.logs as Array<{ tool: string; line: string; timestamp: number }>;
+          }
+          break;
+        }
+
         case "scan_started":
           next.target_domain = (data.target_domain as string) || null;
           break;
@@ -139,6 +165,13 @@ export function useWebSocket({
           next.tool_statuses = {
             ...next.tool_statuses,
             [data.tool as string]: "error",
+          };
+          break;
+
+        case "tool_skipped":
+          next.tool_statuses = {
+            ...next.tool_statuses,
+            [data.tool as string]: "skipped",
           };
           break;
 

@@ -36,10 +36,6 @@ async def _push_to_defectdojo(
     Creates a product (if needed), engagement, and imports available
     raw scan output files (Nuclei JSONL, ZAP JSON, Nmap XML).
     """
-    if not settings.defectdojo_api_key:
-        logger.info("DefectDojo API key not configured — skipping push")
-        return
-
     await emitter.emit("tool_started", {"tool": "defectdojo"})
 
     client = DefectDojoClient(
@@ -232,8 +228,11 @@ async def run_phase_report(
 
     # Push to DefectDojo if configured
     push_to_dojo = config.get("push_to_defectdojo", True)
-    if push_to_dojo:
+    if push_to_dojo and settings.defectdojo_api_key:
         await _push_to_defectdojo(scan, results_dir, emitter, db_session_factory)
+    else:
+        reason = "disabled in config" if not push_to_dojo else "API key not configured"
+        await emitter.emit("tool_skipped", {"tool": "defectdojo", "reason": reason})
 
     # Build and emit summary
     summary = await _build_final_summary(scan_id, db_session_factory)

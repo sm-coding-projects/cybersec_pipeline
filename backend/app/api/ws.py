@@ -45,6 +45,17 @@ async def websocket_scan_events(websocket: WebSocket, scan_id: int) -> None:
         await pubsub.subscribe(channel)
         logger.info("Subscribed to Redis channel %s", channel)
 
+        # Send live state snapshot so late-joining clients (e.g. after navigation)
+        # immediately see which tools/phases are already running or completed
+        try:
+            live_state_raw = await redis_client.get(f"scan_live_state:{scan_id}")
+            if live_state_raw:
+                live_state = json.loads(live_state_raw)
+                await websocket.send_json({"event": "state_snapshot", "data": live_state})
+                logger.debug("Sent state_snapshot to new client for scan %d", scan_id)
+        except Exception:
+            logger.warning("Failed to send state snapshot for scan %d", scan_id, exc_info=True)
+
         # Run two concurrent tasks:
         # 1. Listen for Redis pub/sub messages and forward to WebSocket
         # 2. Listen for WebSocket messages (to detect disconnect)

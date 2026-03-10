@@ -30,6 +30,16 @@ Scans run through 4 sequential phases:
 | 3. VulnScan | Nuclei, ZAP | Vulnerability scanning, web app testing |
 | 4. Report | DefectDojo | Findings aggregation, export |
 
+### Real-time State Management
+
+The scan detail page stays accurate across navigation, hard refreshes, and reconnects through a two-layer approach:
+
+**DB persistence (source of truth):** Tool statuses are written to `scan_phases.tool_statuses` on every `tool_started / tool_completed / tool_error / tool_skipped` event — not only at phase completion. A `GET /scans/{id}` therefore always returns the live state of the running phase, so a page load or refresh shows correct tool statuses with no WebSocket history needed.
+
+**Redis live state snapshot (fast reconnect + logs):** Every event also updates a `scan_live_state:{scan_id}` Redis key containing `current_phase`, `phase_statuses`, `tool_statuses`, and a rolling 200-line log buffer. When a WebSocket client connects (including after navigating away and back), the server sends a `state_snapshot` event before starting the pub/sub stream. The frontend merges this snapshot into its local state so tools and logs are populated immediately without waiting for new pipeline events.
+
+**Worker startup cleanup:** On startup the Celery worker queries for any scans left in `running` or `pending` state and marks them `failed`. This prevents zombie scans — scans whose pipeline was killed by a worker restart falling outside the Redis 1-hour visibility timeout. Users can then retry those scans.
+
 ## Tech Stack
 
 **Backend:** Python 3.12, FastAPI, Celery 5, SQLAlchemy 2 (async), PostgreSQL 16, Redis 7, Alembic

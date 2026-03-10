@@ -5,6 +5,7 @@ import { PHASE_NAMES, TOOL_NAMES } from "@/utils/constants";
 
 interface PhaseCardProps {
   phaseNumber: number;
+  phaseStatus?: string;
   toolStatuses: Record<string, string>;
   toolResults: Record<string, Record<string, unknown>>;
   className?: string;
@@ -18,6 +19,8 @@ function ToolStatusIcon({ status }: { status: string }) {
       return <Check className="h-4 w-4 text-success" />;
     case "error":
       return <AlertCircle className="h-4 w-4 text-severity-critical" />;
+    case "skipped":
+      return <Circle className="h-3 w-3 text-text-muted opacity-50" />;
     default:
       return <Circle className="h-3 w-3 text-text-muted" />;
   }
@@ -31,6 +34,8 @@ function getToolStatusLabel(status: string): string {
       return "Completed";
     case "error":
       return "Error";
+    case "skipped":
+      return "Skipped";
     default:
       return "Queued";
   }
@@ -44,6 +49,8 @@ function getToolStatusColor(status: string): string {
       return "text-success";
     case "error":
       return "text-severity-critical";
+    case "skipped":
+      return "text-text-muted opacity-50";
     default:
       return "text-text-muted";
   }
@@ -69,6 +76,7 @@ function formatToolResultSummary(results: Record<string, unknown>): string {
 
 export default function PhaseCard({
   phaseNumber,
+  phaseStatus,
   toolStatuses,
   toolResults,
   className = "",
@@ -106,7 +114,8 @@ export default function PhaseCard({
       ) : (
         <div className="space-y-2">
           {displayTools.map((tool) => {
-            const status = toolStatuses[tool] || "pending";
+            const phaseIsDone = phaseStatus === "completed" || phaseStatus === "failed";
+            const status = toolStatuses[tool] || (phaseIsDone ? "skipped" : "pending");
             const results = toolResults[tool];
             const resultSummary = results ? formatToolResultSummary(results) : "";
 
