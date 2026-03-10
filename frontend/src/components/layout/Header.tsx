@@ -1,9 +1,11 @@
-import { LogOut, User } from "lucide-react";
+import { LogOut, User, Sun, Moon } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
+import { useTheme } from "@/hooks/useTheme";
 import Button from "@/components/common/Button";
 
 export default function Header() {
   const { user, logout } = useAuth();
+  const { theme, toggleTheme } = useTheme();
 
   return (
     <header className="fixed top-0 left-56 right-0 h-14 bg-surface border-b border-border flex items-center justify-between px-6 z-20">
@@ -14,6 +16,14 @@ export default function Header() {
       </div>
 
       <div className="flex items-center gap-4">
+        <button
+          onClick={toggleTheme}
+          className="p-1.5 rounded text-text-secondary hover:text-text-primary hover:bg-surface-elevated transition-colors"
+          title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+        >
+          {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+        </button>
+
         {user && (
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2 text-text-secondary">

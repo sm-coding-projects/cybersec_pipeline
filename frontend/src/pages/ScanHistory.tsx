@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useState, type MouseEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { History } from "lucide-react";
-import { useScans } from "@/api/scans";
+import { History, Trash2 } from "lucide-react";
+import { useScans, useDeleteScan } from "@/api/scans";
 import LoadingSpinner from "@/components/common/LoadingSpinner";
 import Badge from "@/components/common/Badge";
 import Table, { Pagination, type Column } from "@/components/common/Table";
@@ -14,8 +14,27 @@ export default function ScanHistory() {
   const navigate = useNavigate();
   const [page, setPage] = useState(1);
   const perPage = 15;
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
 
   const { data, isLoading, isError } = useScans(page, perPage);
+  const deleteScan = useDeleteScan();
+
+  function handleDeleteClick(e: MouseEvent, scan: Scan) {
+    e.stopPropagation();
+    setConfirmDeleteId(scan.id);
+  }
+
+  function handleConfirmDelete(e: MouseEvent, scanId: number) {
+    e.stopPropagation();
+    deleteScan.mutate(scanId, {
+      onSuccess: () => setConfirmDeleteId(null),
+    });
+  }
+
+  function handleCancelDelete(e: MouseEvent) {
+    e.stopPropagation();
+    setConfirmDeleteId(null);
+  }
 
   const columns: Column<Scan>[] = [
     {
@@ -76,7 +95,6 @@ export default function ScanHistory() {
       key: "findings",
       header: "Findings",
       render: (scan) => {
-        // Sum up findings from phases or show --
         const totalFindings = scan.phases.reduce((sum, phase) => {
           const toolStatuses = phase.tool_statuses || {};
           return sum + Object.keys(toolStatuses).length;
@@ -85,6 +103,44 @@ export default function ScanHistory() {
           <span className="font-mono text-text-secondary text-xs">
             {scan.status === ScanStatus.PENDING ? "--" : totalFindings || "--"}
           </span>
+        );
+      },
+    },
+    {
+      key: "actions",
+      header: "",
+      render: (scan) => {
+        const isConfirming = confirmDeleteId === scan.id;
+        const isDeleting = deleteScan.isPending && confirmDeleteId === scan.id;
+
+        if (isConfirming) {
+          return (
+            <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+              <button
+                onClick={(e) => handleConfirmDelete(e, scan.id)}
+                disabled={isDeleting}
+                className="px-2 py-1 text-xs font-mono rounded bg-severity-critical text-white hover:bg-red-600 transition-colors disabled:opacity-50"
+              >
+                {isDeleting ? "Deleting…" : "Delete"}
+              </button>
+              <button
+                onClick={handleCancelDelete}
+                className="px-2 py-1 text-xs font-mono rounded text-text-secondary hover:text-text-primary hover:bg-surface-elevated transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          );
+        }
+
+        return (
+          <button
+            onClick={(e) => handleDeleteClick(e, scan)}
+            className="p-1.5 rounded text-text-muted hover:text-severity-critical hover:bg-severity-critical/10 transition-colors"
+            title="Delete scan"
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
         );
       },
     },
