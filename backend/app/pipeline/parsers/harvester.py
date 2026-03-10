@@ -48,7 +48,7 @@ def parse_harvester_output(filepath: str) -> HarvesterResult:
         if not isinstance(entry, str):
             continue
         # Some versions output "sub.example.com:1.2.3.4" — take just the hostname.
-        hostname = entry.split(":")[0].strip()
+        hostname = entry.split(":")[0].strip().lower()
         if hostname:
             subdomains.append(hostname)
 

@@ -372,7 +372,7 @@ async def run_phase_network(
                         Target.target_type == TargetType.IP,
                     )
                 )
-                target = result.scalar_one_or_none()
+                target = result.scalars().first()
                 if target is not None:
                     target.open_ports = [
                         {"port": p.port, "protocol": p.protocol, "service": p.service, "version": p.version}
@@ -403,7 +403,7 @@ async def run_phase_network(
                         Target.target_type == TargetType.SUBDOMAIN,
                     )
                 )
-                target = result.scalar_one_or_none()
+                target = result.scalars().first()
                 if target is not None:
                     target.http_status = httpx_data.status_code
                     target.http_title = httpx_data.title[:500] if httpx_data.title else None

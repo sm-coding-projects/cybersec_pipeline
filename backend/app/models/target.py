@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, func
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -9,6 +9,9 @@ from app.models.base import Base, TargetType
 
 class Target(Base):
     __tablename__ = "targets"
+    __table_args__ = (
+        UniqueConstraint("scan_id", "target_type", "value", name="uq_targets_scan_type_value"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id", ondelete="CASCADE"), nullable=False, index=True)
