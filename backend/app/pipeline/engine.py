@@ -231,6 +231,9 @@ class PipelineEngine:
         config = scan.config or {}
         results_dir = scan.results_dir
         target_domain = scan.target_domain
+        # Make target_domain available in config for all phases so they can
+        # fall back to scanning the root domain when Phase 1 finds nothing.
+        config = {**config, "target_domain": target_domain}
 
         scan_completed = False
         scan_failed = False

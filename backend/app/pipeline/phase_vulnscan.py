@@ -313,8 +313,17 @@ async def run_phase_vulnscan(
         urls = [t.value for t in url_targets]
 
     if not urls:
-        logger.info("No live URLs for vulnerability scanning — phase will have no findings")
-        return
+        target_domain = config.get("target_domain", "")
+        if target_domain:
+            # Phase 2 found no live URLs (httpx had nothing to probe, or all probes failed).
+            # Construct minimal base URLs for the root domain so we always run vuln tools.
+            urls = [f"http://{target_domain}", f"https://{target_domain}"]
+            logger.info(
+                "Phase 2 found no live URLs — using root domain URLs as fallback: %s", urls
+            )
+        else:
+            logger.info("No live URLs for vulnerability scanning — phase will have no findings")
+            return
 
     logger.info("Phase 3 vulnscan: scanning %d URLs", len(urls))
 

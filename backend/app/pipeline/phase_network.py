@@ -329,7 +329,19 @@ async def run_phase_network(
 
     logger.info("Phase 2 network scan: %d IPs, %d live subdomains", len(ips), len(subdomains))
 
-    # Step 1: Masscan fast port sweep
+    # If Phase 1 found nothing, fall back to scanning the root domain directly.
+    # This ensures every scan does at least some work even when OSINT turns up empty.
+    target_domain = config.get("target_domain", "")
+    nmap_targets: list[str] = list(ips)
+    httpx_targets: list[str] = list(subdomains)
+    if not nmap_targets and target_domain:
+        logger.info("Phase 1 found no IPs — falling back to root domain '%s' for Nmap", target_domain)
+        nmap_targets = [target_domain]
+    if not httpx_targets and target_domain:
+        logger.info("Phase 1 found no live subdomains — falling back to root domain '%s' for httpx", target_domain)
+        httpx_targets = [target_domain]
+
+    # Step 1: Masscan fast port sweep (real IPs only — masscan cannot resolve hostnames)
     masscan_results: list[MasscanResult] = []
     if ips:
         try:
@@ -337,15 +349,18 @@ async def run_phase_network(
         except Exception as exc:
             logger.warning("Masscan failed: %s — continuing with top-ports Nmap", exc)
             await emitter.emit("tool_error", {"tool": "masscan", "error": str(exc)[:500]})
+    else:
+        # No real IPs — masscan can't run; skip it visibly
+        await emitter.emit("tool_skipped", {"tool": "masscan", "reason": "No IP addresses discovered in Phase 1"})
 
     # Step 2: Nmap service detection
     nmap_results: list[NmapHost] = []
     try:
         if masscan_results:
             nmap_results = await run_nmap(docker, masscan_results, config, results_dir, emitter)
-        elif ips:
-            # Masscan failed or found nothing — do a default Nmap scan
-            nmap_results = await run_nmap(docker, ips, config, results_dir, emitter)
+        elif nmap_targets:
+            # Masscan found nothing or was skipped — scan using Nmap directly
+            nmap_results = await run_nmap(docker, nmap_targets, config, results_dir, emitter)
     except Exception as exc:
         logger.warning("Nmap failed: %s — continuing without service data", exc)
         await emitter.emit("tool_error", {"tool": "nmap", "error": str(exc)[:500]})
@@ -353,7 +368,7 @@ async def run_phase_network(
     # Step 3: httpx HTTP probing
     httpx_results: list[HttpxResult] = []
     try:
-        httpx_results = await run_httpx_scan(docker, subdomains, config, results_dir, emitter)
+        httpx_results = await run_httpx_scan(docker, httpx_targets, config, results_dir, emitter)
     except Exception as exc:
         logger.warning("httpx failed: %s — continuing without HTTP data", exc)
         await emitter.emit("tool_error", {"tool": "httpx", "error": str(exc)[:500]})
