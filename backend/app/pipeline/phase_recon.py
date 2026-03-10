@@ -116,7 +116,7 @@ async def run_amass(
 ) -> AmassResult:
     """Run Amass passive enumeration and return parsed results.
 
-    Command: ``amass enum -passive -d {domain} -timeout {timeout} -o {output_prefix}``
+    Command: ``amass enum -passive -d {domain} -timeout {timeout} -o {results_dir}/phase1_recon/amass.txt``
     Output: plain-text file at ``{results_dir}/phase1_recon/amass.txt`` (one subdomain per line).
     Amass v4 removed the ``-json`` flag; IP resolution is handled downstream by dnsx.
     """
@@ -125,12 +125,11 @@ async def run_amass(
     domain = config["target_domain"]
     timeout = config.get("amass_timeout", 15)
     phase_dir = f"{results_dir}/phase1_recon"
-    output_prefix = f"{phase_dir}/amass"
     output_file = f"{phase_dir}/amass.txt"
 
     await docker.exec_in_container("amass", f"mkdir -p {phase_dir}")
 
-    command = f"amass enum -passive -d {domain} -timeout {timeout} -o {output_prefix}"
+    command = f"amass enum -passive -d {domain} -timeout {timeout} -o {output_file}"
     exit_code, output = await retry_tool_exec(
         docker=docker,
         container="amass",
