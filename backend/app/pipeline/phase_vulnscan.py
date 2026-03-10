@@ -24,7 +24,7 @@ from app.models.finding import Finding
 from app.models.target import Target
 from app.pipeline.engine import EventEmitter
 from app.pipeline.parsers import NucleiFinding, ZapAlert, parse_nuclei_output, parse_zap_output
-from app.pipeline.utils import retry_tool_exec, validate_tool_output
+from app.pipeline.utils import emit_tool_output, retry_tool_exec, validate_tool_output
 from app.services.docker_manager import DockerManager
 
 logger = logging.getLogger(__name__)
@@ -85,6 +85,8 @@ async def run_nuclei(
         delay=5.0,
         timeout=1800,  # Nuclei can take a long time
     )
+
+    await emit_tool_output(emitter, "nuclei", output)
 
     if exit_code != 0:
         await emitter.emit("tool_error", {"tool": "nuclei", "output": output[-500:]})
@@ -167,19 +169,24 @@ async def run_zap(
             # Spider each URL (limited depth for speed)
             for url in urls[:10]:  # Limit to avoid extremely long scans
                 try:
+                    await emitter.emit("tool_log", {"tool": "zap", "line": f"Starting spider: {url}"})
                     spider_params = {**params, "url": url, "maxChildren": "10", "recurse": "true"}
                     spider_resp = await client.get("/JSON/spider/action/scan/", params=spider_params)
                     spider_resp.raise_for_status()
                     spider_id = spider_resp.json().get("scan", "0")
 
                     # Wait for spider to complete (poll with timeout)
-                    for _ in range(60):  # Max 5 minutes per URL
+                    for poll in range(60):  # Max 5 minutes per URL
                         status_resp = await client.get(
                             "/JSON/spider/view/status/",
                             params={**params, "scanId": str(spider_id)},
                         )
-                        if status_resp.json().get("status", "0") == "100":
+                        progress = status_resp.json().get("status", "0")
+                        if progress == "100":
+                            await emitter.emit("tool_log", {"tool": "zap", "line": f"Spider complete: {url}"})
                             break
+                        if poll % 6 == 0:  # Log every 30s
+                            await emitter.emit("tool_log", {"tool": "zap", "line": f"Spider {progress}% for {url}"})
                         await asyncio.sleep(5)
 
                 except Exception as exc:
@@ -189,19 +196,24 @@ async def run_zap(
             # Run active scan on each URL
             for url in urls[:10]:
                 try:
+                    await emitter.emit("tool_log", {"tool": "zap", "line": f"Starting active scan: {url}"})
                     ascan_params = {**params, "url": url, "recurse": "true"}
                     ascan_resp = await client.get("/JSON/ascan/action/scan/", params=ascan_params)
                     ascan_resp.raise_for_status()
                     scan_id = ascan_resp.json().get("scan", "0")
 
                     # Wait for active scan to complete
-                    for _ in range(120):  # Max 10 minutes per URL
+                    for poll in range(120):  # Max 10 minutes per URL
                         status_resp = await client.get(
                             "/JSON/ascan/view/status/",
                             params={**params, "scanId": str(scan_id)},
                         )
-                        if status_resp.json().get("status", "0") == "100":
+                        progress = status_resp.json().get("status", "0")
+                        if progress == "100":
+                            await emitter.emit("tool_log", {"tool": "zap", "line": f"Active scan complete: {url}"})
                             break
+                        if poll % 6 == 0:  # Log every 30s
+                            await emitter.emit("tool_log", {"tool": "zap", "line": f"Active scan {progress}% for {url}"})
                         await asyncio.sleep(5)
 
                 except Exception as exc:

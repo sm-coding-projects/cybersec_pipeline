@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from app.core.exceptions import ToolExecutionError
 from app.services.docker_manager import DockerManager
+
+if TYPE_CHECKING:
+    from app.pipeline.engine import EventEmitter
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +218,20 @@ async def validate_tool_output(
             raise
         logger.warning("Could not validate output file for %s: %s", tool_name, output_file)
         return False
+
+
+async def emit_tool_output(emitter: "EventEmitter", tool: str, output: str) -> None:
+    """Emit a tool's stdout/stderr as individual tool_log events.
+
+    Called after exec_in_container returns so that the output is visible
+    in the live log panel.  Limits to the last 200 lines to avoid flooding
+    the WebSocket connection.
+    """
+    if not output:
+        return
+    lines = [line for line in output.splitlines() if line.strip()]
+    for line in lines[-200:]:
+        await emitter.emit("tool_log", {"tool": tool, "line": line})
 
 
 class ToolTimeout(Exception):

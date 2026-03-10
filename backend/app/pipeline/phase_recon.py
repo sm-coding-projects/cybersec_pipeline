@@ -19,7 +19,7 @@ from app.models.base import TargetType
 from app.models.target import Target
 from app.pipeline.engine import EventEmitter
 from app.pipeline.parsers import AmassResult, HarvesterResult, parse_amass_output, parse_harvester_output
-from app.pipeline.utils import retry_tool_exec, validate_tool_output
+from app.pipeline.utils import emit_tool_output, retry_tool_exec, validate_tool_output
 from app.services.docker_manager import DockerManager
 
 logger = logging.getLogger(__name__)
@@ -58,6 +58,8 @@ async def run_theharvester(
         delay=5.0,
         timeout=300,
     )
+
+    await emit_tool_output(emitter, "theharvester", output)
 
     if exit_code != 0:
         await emitter.emit("tool_error", {"tool": "theharvester", "output": output[-500:]})
@@ -136,6 +138,8 @@ async def run_amass(
         timeout=timeout * 60 + 60,  # Extra buffer beyond the tool timeout
     )
 
+    await emit_tool_output(emitter, "amass", output)
+
     if exit_code != 0:
         await emitter.emit("tool_error", {"tool": "amass", "output": output[-500:]})
         raise ToolExecutionError(
@@ -213,6 +217,8 @@ async def run_dnsx(
         delay=5.0,
         timeout=300,
     )
+
+    await emit_tool_output(emitter, "dnsx", output)
 
     if exit_code != 0:
         await emitter.emit("tool_error", {"tool": "dnsx", "output": output[-500:]})

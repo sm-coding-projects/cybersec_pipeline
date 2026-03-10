@@ -27,7 +27,7 @@ from app.pipeline.parsers import (
     parse_masscan_output,
     parse_nmap_output,
 )
-from app.pipeline.utils import retry_tool_exec, validate_tool_output
+from app.pipeline.utils import emit_tool_output, retry_tool_exec, validate_tool_output
 from app.services.docker_manager import DockerManager
 
 logger = logging.getLogger(__name__)
@@ -74,6 +74,8 @@ async def run_masscan(
         delay=5.0,
         timeout=600,
     )
+
+    await emit_tool_output(emitter, "masscan", output)
 
     # Masscan exit code 1 can mean "no results" on some platforms — check output file
     if exit_code != 0:
@@ -167,6 +169,8 @@ async def run_nmap(
         timeout=600,
     )
 
+    await emit_tool_output(emitter, "nmap", output)
+
     if exit_code != 0:
         await emitter.emit("tool_error", {"tool": "nmap", "output": output[-500:]})
         raise ToolExecutionError(
@@ -240,6 +244,8 @@ async def run_httpx_scan(
         delay=5.0,
         timeout=300,
     )
+
+    await emit_tool_output(emitter, "httpx", output)
 
     if exit_code != 0:
         await emitter.emit("tool_error", {"tool": "httpx", "output": output[-500:]})
