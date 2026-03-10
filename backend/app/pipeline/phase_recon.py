@@ -19,7 +19,7 @@ from app.models.base import TargetType
 from app.models.target import Target
 from app.pipeline.engine import EventEmitter
 from app.pipeline.parsers import AmassResult, HarvesterResult, parse_amass_output, parse_harvester_output
-from app.pipeline.utils import emit_tool_output, retry_tool_exec, validate_tool_output
+from app.pipeline.utils import emit_tool_output, ensure_writable_dir, retry_tool_exec, validate_tool_output
 from app.services.docker_manager import DockerManager
 
 logger = logging.getLogger(__name__)
@@ -274,6 +274,15 @@ async def run_phase_recon(
     3. Run dnsx for DNS resolution
     4. Save targets to the database
     """
+    # Pre-create the phase directory from the Celery worker (root) with world-
+    # writable permissions so tool containers running as non-root users (e.g.
+    # the 'amass' user in the caffix/amass image) can write output files.
+    # This must happen BEFORE asyncio.gather launches tools in parallel to avoid
+    # a race where theHarvester (root) creates the dir as 755 and Amass gets
+    # "permission denied".
+    phase_dir = f"{results_dir}/phase1_recon"
+    ensure_writable_dir(phase_dir)
+
     # Ensure the target_domain is in config for tool runners
     async with db_session_factory() as session:
         from app.models.scan import Scan

@@ -27,7 +27,7 @@ from app.pipeline.parsers import (
     parse_masscan_output,
     parse_nmap_output,
 )
-from app.pipeline.utils import emit_tool_output, retry_tool_exec, validate_tool_output
+from app.pipeline.utils import emit_tool_output, ensure_writable_dir, retry_tool_exec, validate_tool_output
 from app.services.docker_manager import DockerManager
 
 logger = logging.getLogger(__name__)
@@ -326,6 +326,10 @@ async def run_phase_network(
                 for ip in st.resolved_ips:
                     if ip not in ips:
                         ips.append(ip)
+
+    # Pre-create the phase directory as root with 777 permissions before any
+    # tool container tries to write into it.
+    ensure_writable_dir(f"{results_dir}/phase2_network")
 
     logger.info("Phase 2 network scan: %d IPs, %d live subdomains", len(ips), len(subdomains))
 

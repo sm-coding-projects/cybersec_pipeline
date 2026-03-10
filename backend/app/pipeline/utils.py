@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, TYPE_CHECKING
 
 from app.core.exceptions import ToolExecutionError
@@ -16,6 +17,32 @@ if TYPE_CHECKING:
     from app.pipeline.engine import EventEmitter
 
 logger = logging.getLogger(__name__)
+
+
+def ensure_writable_dir(path: str) -> None:
+    """Create *path* and set it world-writable (0o777).
+
+    Called from phase orchestrators **before** launching any tool containers
+    in parallel.  The Celery worker runs as root and has the shared /results
+    volume mounted, so it can create directories that all tool containers
+    (which may run as non-root users) can then write into.
+
+    Without this, theHarvester (root) and Amass (non-root 'amass' user) race
+    to ``mkdir -p`` the same phase directory via asyncio.gather.  If
+    theHarvester wins, it creates the directory owned by root with mode 755,
+    and Amass then gets "permission denied" trying to write files inside it.
+    """
+    os.makedirs(path, exist_ok=True)
+    try:
+        os.chmod(path, 0o777)
+        # Also ensure the parent (scan results dir) is accessible so future
+        # phase orchestrators can create sibling directories.
+        parent = os.path.dirname(path.rstrip("/"))
+        if parent and os.path.isdir(parent):
+            os.chmod(parent, 0o777)
+    except OSError as exc:
+        logger.warning("Could not chmod %s: %s", path, exc)
+
 
 # Error substrings that indicate a transient (retryable) failure.
 TRANSIENT_ERROR_PATTERNS: list[str] = [

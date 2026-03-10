@@ -229,7 +229,9 @@ class PipelineEngine:
             return
 
         config = scan.config or {}
-        results_dir = scan.results_dir
+        # Strip trailing slash to prevent double-slash in constructed paths
+        # (e.g. /results/scan_xxx//phase1_recon → /results/scan_xxx/phase1_recon)
+        results_dir = (scan.results_dir or "").rstrip("/")
         target_domain = scan.target_domain
         # Make target_domain available in config for all phases so they can
         # fall back to scanning the root domain when Phase 1 finds nothing.
