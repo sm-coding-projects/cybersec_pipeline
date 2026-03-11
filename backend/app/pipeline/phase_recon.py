@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.exceptions import ToolExecutionError
@@ -347,56 +348,61 @@ async def run_phase_recon(
     # DNS resolution via dnsx
     dns_resolved = await run_dnsx(docker, all_subdomains, results_dir, emitter)
 
-    # Save targets to database
-    async with db_session_factory() as session:
-        # Save subdomains
-        for subdomain in all_subdomains:
-            source = "theharvester+amass"
-            if subdomain in [s for s in harvester_result.subdomains] and subdomain not in amass_result.subdomains:
-                source = "theharvester"
-            elif subdomain in amass_result.subdomains and subdomain not in harvester_result.subdomains:
-                source = "amass"
+    # Save targets to database (upsert — ignore duplicates for the same scan)
+    rows: list[dict] = []
 
-            resolved_ips = dns_resolved.get(subdomain, [])
-            target = Target(
-                scan_id=scan_id,
-                target_type=TargetType.SUBDOMAIN,
-                value=subdomain,
-                source_tool=source,
-                is_live=len(resolved_ips) > 0,
-                resolved_ips=resolved_ips if resolved_ips else None,
+    for subdomain in all_subdomains:
+        source = "theharvester+amass"
+        if subdomain in harvester_result.subdomains and subdomain not in amass_result.subdomains:
+            source = "theharvester"
+        elif subdomain in amass_result.subdomains and subdomain not in harvester_result.subdomains:
+            source = "amass"
+
+        resolved_ips = dns_resolved.get(subdomain, [])
+        rows.append({
+            "scan_id": scan_id,
+            "target_type": TargetType.SUBDOMAIN,
+            "value": subdomain,
+            "source_tool": source,
+            "is_live": len(resolved_ips) > 0,
+            "resolved_ips": resolved_ips if resolved_ips else None,
+        })
+
+    for ip in all_ips:
+        source = "theharvester+amass"
+        if ip in harvester_result.ips and ip not in amass_result.ips:
+            source = "theharvester"
+        elif ip in amass_result.ips and ip not in harvester_result.ips:
+            source = "amass"
+
+        rows.append({
+            "scan_id": scan_id,
+            "target_type": TargetType.IP,
+            "value": ip,
+            "source_tool": source,
+            "is_live": True,
+            "resolved_ips": None,
+        })
+
+    for email in all_emails:
+        rows.append({
+            "scan_id": scan_id,
+            "target_type": TargetType.EMAIL,
+            "value": email,
+            "source_tool": "theharvester",
+            "is_live": False,
+            "resolved_ips": None,
+        })
+
+    if rows:
+        async with db_session_factory() as session:
+            stmt = (
+                pg_insert(Target)
+                .values(rows)
+                .on_conflict_do_nothing(index_elements=["scan_id", "target_type", "value"])
             )
-            session.add(target)
-
-        # Save IPs
-        for ip in all_ips:
-            source = "theharvester+amass"
-            if ip in harvester_result.ips and ip not in amass_result.ips:
-                source = "theharvester"
-            elif ip in amass_result.ips and ip not in harvester_result.ips:
-                source = "amass"
-
-            target = Target(
-                scan_id=scan_id,
-                target_type=TargetType.IP,
-                value=ip,
-                source_tool=source,
-                is_live=True,
-            )
-            session.add(target)
-
-        # Save emails
-        for email in all_emails:
-            target = Target(
-                scan_id=scan_id,
-                target_type=TargetType.EMAIL,
-                value=email,
-                source_tool="theharvester",
-                is_live=False,
-            )
-            session.add(target)
-
-        await session.commit()
+            await session.execute(stmt)
+            await session.commit()
 
     logger.info(
         "Phase 1 recon complete: %d subdomains, %d IPs, %d emails, %d DNS resolved",
