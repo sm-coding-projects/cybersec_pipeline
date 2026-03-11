@@ -24,6 +24,17 @@ MAX_WAIT=180   # seconds to wait for DefectDojo DB to become available
 die() { echo "ERROR: $*" >&2; exit 1; }
 log() { echo "==> $*"; }
 
+# Run a Django shell snippet, stripping tagulous auto-import noise from stdout.
+# Those lines ("N objects could not be automatically imported" + indented model
+# paths + "N objects imported automatically") are printed by django-tagulous
+# during AppRegistry.ready() on every manage.py invocation and are not errors.
+dj_shell() {
+    docker exec "$CONTAINER" python manage.py shell -c "$1" \
+        | grep -Ev "^[0-9]+ objects (could not be automatically imported|imported automatically)" \
+        | grep -Ev "^\s+(dojo|django)\." \
+        | sed '/^[[:space:]]*$/d'
+}
+
 # ── pre-flight ────────────────────────────────────────────────────────────────
 
 docker inspect "$CONTAINER" --format='{{.State.Running}}' 2>/dev/null \
@@ -58,7 +69,7 @@ docker exec "$CONTAINER" python manage.py migrate --no-input
 # ── admin user ────────────────────────────────────────────────────────────────
 
 log "Creating admin user '$ADMIN_USER'..."
-docker exec "$CONTAINER" python manage.py shell -c "
+dj_shell "
 from django.contrib.auth.models import User
 if User.objects.filter(username='${ADMIN_USER}').exists():
     print('  Admin user already exists — skipping creation.')
@@ -72,7 +83,7 @@ else:
 "
 
 # set/reset password in case this is a re-run with a different password
-docker exec "$CONTAINER" python manage.py shell -c "
+dj_shell "
 from django.contrib.auth.models import User
 u = User.objects.get(username='${ADMIN_USER}')
 u.set_password('${ADMIN_PASSWORD}')
@@ -82,7 +93,7 @@ u.save()
 # ── product type ──────────────────────────────────────────────────────────────
 
 log "Creating default product type..."
-docker exec "$CONTAINER" python manage.py shell -c "
+dj_shell "
 from dojo.models import Product_Type
 if not Product_Type.objects.filter(name='External Assessment').exists():
     Product_Type(name='External Assessment').save()
@@ -94,13 +105,13 @@ else:
 # ── API token ─────────────────────────────────────────────────────────────────
 
 log "Retrieving API token..."
-API_TOKEN=$(docker exec "$CONTAINER" python manage.py shell -c "
+API_TOKEN=$(dj_shell "
 from rest_framework.authtoken.models import Token
 from django.contrib.auth.models import User
 u = User.objects.get(username='${ADMIN_USER}')
 token, _ = Token.objects.get_or_create(user=u)
 print(token.key)
-")
+" | grep -E '^[a-f0-9]{40}$')
 
 # ── done ──────────────────────────────────────────────────────────────────────
 
