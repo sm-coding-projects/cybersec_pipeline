@@ -129,7 +129,8 @@ async def run_amass(
 
     await docker.exec_in_container("amass", f"mkdir -p {phase_dir}")
 
-    command = f"amass enum -passive -d {domain} -timeout {timeout} -o {output_file}"
+    # Note: -passive is deprecated in Amass v4 (passive is the default)
+    command = f"amass enum -d {domain} -timeout {timeout} -o {output_file}"
     exit_code, output = await retry_tool_exec(
         docker=docker,
         container="amass",
@@ -326,7 +327,14 @@ async def run_phase_recon(
             )
 
     # Merge and deduplicate
-    all_subdomains = list(set(harvester_result.subdomains + amass_result.subdomains))
+    # Filter Amass subdomains to only include those under the target domain
+    # (Amass v4 graph format may include external FQDNs like NS servers)
+    target_domain = config.get("target_domain", "")
+    amass_subdomains = [
+        s for s in amass_result.subdomains
+        if s == target_domain or s.endswith(f".{target_domain}")
+    ]
+    all_subdomains = list(set(harvester_result.subdomains + amass_subdomains))
     all_ips = list(set(harvester_result.ips + amass_result.ips))
     all_emails = list(set(harvester_result.emails))
 

@@ -166,6 +166,13 @@ async def run_zap(
                 await emitter.emit("tool_error", {"tool": "zap", "output": f"ZAP not reachable: {exc}"})
                 raise ToolExecutionError(tool="zap", message=f"ZAP API not reachable: {exc}")
 
+            # Clear previous session to prevent alert leakage between scans
+            try:
+                await client.get("/JSON/core/action/newSession/", params={**params, "overwrite": "true"})
+                logger.info("ZAP session cleared for fresh scan")
+            except Exception as exc:
+                logger.warning("Could not clear ZAP session: %s (continuing)", exc)
+
             # Spider each URL (limited depth for speed)
             for url in urls[:10]:  # Limit to avoid extremely long scans
                 try:
@@ -193,8 +200,31 @@ async def run_zap(
                     logger.warning("ZAP spider failed for %s: %s", url, exc)
                     continue
 
-            # Run active scan on each URL
+            # Check which URLs are in ZAP's site tree (spider must have found them)
+            try:
+                sites_resp = await client.get("/JSON/core/view/sites/", params=params)
+                sites_resp.raise_for_status()
+                known_sites = sites_resp.json().get("sites", [])
+                logger.info("ZAP site tree contains: %s", known_sites)
+            except Exception:
+                known_sites = []
+
+            # Run active scan only on URLs that are in ZAP's site tree
             for url in urls[:10]:
+                # Check if this URL's origin is in ZAP's site tree
+                url_in_tree = any(url.rstrip("/").startswith(site.rstrip("/")) for site in known_sites)
+                if not url_in_tree:
+                    logger.warning(
+                        "Skipping ZAP active scan for %s — not in site tree (spider found nothing). "
+                        "Target may be unreachable.",
+                        url,
+                    )
+                    await emitter.emit("tool_log", {
+                        "tool": "zap",
+                        "line": f"Skipping active scan for {url} — target not reachable by spider",
+                    })
+                    continue
+
                 try:
                     await emitter.emit("tool_log", {"tool": "zap", "line": f"Starting active scan: {url}"})
                     ascan_params = {**params, "url": url, "recurse": "true"}

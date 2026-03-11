@@ -22,6 +22,7 @@ export interface ScanLiveData {
   logs: Array<{ tool: string; line: string; timestamp: number }>;
   summary: Record<string, unknown> | null;
   error: string | null;
+  warnings: string[];
 }
 
 const INITIAL_SCAN_DATA: ScanLiveData = {
@@ -40,6 +41,7 @@ const INITIAL_SCAN_DATA: ScanLiveData = {
   logs: [],
   summary: null,
   error: null,
+  warnings: [],
 };
 
 interface UseWebSocketOptions {
@@ -224,6 +226,22 @@ export function useWebSocket({
 
         case "pipeline_complete":
           next.summary = data.summary as Record<string, unknown> || data;
+          break;
+
+        case "target_unreachable":
+          next.warnings = [
+            ...next.warnings,
+            (data.message as string) || `Target ${data.domain} is unreachable`,
+          ];
+          // Also add to logs for visibility
+          next.logs = [
+            ...next.logs.slice(-MAX_LOG_LINES + 1),
+            {
+              tool: "system",
+              line: `WARNING: ${(data.message as string) || "Target unreachable"}`,
+              timestamp: wsEvent.timestamp,
+            },
+          ];
           break;
 
         case "scan_failed":

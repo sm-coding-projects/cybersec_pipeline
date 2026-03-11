@@ -184,6 +184,17 @@ export default function ScanDetail() {
         )}
       </div>
 
+      {/* Warning banner — target unreachable etc. */}
+      {scanData.warnings.length > 0 && (
+        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4">
+          {scanData.warnings.map((w, i) => (
+            <p key={i} className="text-sm font-mono text-yellow-500">
+              {w}
+            </p>
+          ))}
+        </div>
+      )}
+
       {/* Error banner */}
       {(isFailed || scanData.error) && (
         <div className="bg-severity-critical/10 border border-severity-critical/30 rounded-lg p-4">

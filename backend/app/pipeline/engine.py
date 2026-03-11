@@ -214,7 +214,7 @@ class PipelineEngine:
         from app.pipeline.phase_recon import run_phase_recon
         from app.pipeline.phase_report import run_phase_report
         from app.pipeline.phase_vulnscan import run_phase_vulnscan
-        from app.pipeline.utils import ToolTimeout
+        from app.pipeline.utils import ToolTimeout, check_target_reachable
 
         phase_funcs: dict[str, Callable[..., Coroutine]] = {
             "recon": run_phase_recon,
@@ -248,6 +248,10 @@ class PipelineEngine:
                 "scan_id": self.scan_id,
                 "target_domain": target_domain,
             })
+
+            # Quick reachability check — informs the user if the target isn't
+            # responding over HTTP/HTTPS.  The scan continues regardless.
+            await check_target_reachable(self.docker, target_domain, self.emitter)
 
             for phase_number, phase_name in PHASES:
                 # Check cancellation before each phase

@@ -235,7 +235,7 @@ async def run_httpx_scan(
     subdomain_content = "\\n".join(subdomains)
     await docker.exec_in_container("httpx", f"printf '{subdomain_content}' > {targets_file}")
 
-    command = f"httpx -l {targets_file} -json -o {output_file} -silent -title -tech-detect -status-code"
+    command = f"httpx -l {targets_file} -json -o {output_file} -silent -title -tech-detect -status-code -timeout 10"
     exit_code, output = await retry_tool_exec(
         docker=docker,
         container="httpx",
@@ -272,6 +272,15 @@ async def run_httpx_scan(
         results = parse_httpx_output(tmp_path)
     finally:
         os.unlink(tmp_path)
+
+    if not results:
+        await emitter.emit("tool_log", {
+            "tool": "httpx",
+            "line": (
+                f"httpx found no live HTTP endpoints among {len(subdomains)} target(s). "
+                "Targets may be unreachable, behind a firewall, or not running web services."
+            ),
+        })
 
     await emitter.emit("tool_result", {
         "tool": "httpx",

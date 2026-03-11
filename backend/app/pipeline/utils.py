@@ -261,6 +261,45 @@ async def emit_tool_output(emitter: "EventEmitter", tool: str, output: str) -> N
         await emitter.emit("tool_log", {"tool": tool, "line": line})
 
 
+async def check_target_reachable(
+    docker: DockerManager,
+    domain: str,
+    emitter: "EventEmitter",
+) -> bool:
+    """Quick check whether the target domain resolves and has an HTTP(S) service.
+
+    Runs a fast httpx probe (5s timeout) inside the httpx container.  If the
+    domain is unreachable, emits a warning event so the UI can inform the user.
+    Returns ``True`` if the target responded over HTTP or HTTPS, ``False`` if not.
+
+    This is informational only — the pipeline continues regardless, since
+    passive tools (Amass, theHarvester, DNS) can still discover useful data.
+    """
+    try:
+        exit_code, output = await docker.exec_in_container(
+            "httpx",
+            f"httpx -u {domain} -silent -status-code -timeout 5",
+            timeout=15,
+        )
+        reachable = exit_code == 0 and output.strip() != ""
+        if not reachable:
+            logger.warning("Target %s is not reachable over HTTP/HTTPS from Docker network", domain)
+            await emitter.emit("target_unreachable", {
+                "domain": domain,
+                "message": (
+                    f"Target '{domain}' did not respond over HTTP or HTTPS. "
+                    "Passive recon (DNS, certificates) will still run, but active "
+                    "scanning tools (httpx, Nuclei, ZAP) may produce no results."
+                ),
+            })
+        else:
+            logger.info("Target %s is reachable: %s", domain, output.strip())
+        return reachable
+    except Exception as exc:
+        logger.warning("Reachability check failed for %s: %s", domain, exc)
+        return False
+
+
 class ToolTimeout(Exception):
     """Raised when a tool execution exceeds its timeout."""
 

@@ -107,14 +107,14 @@ class TestRunAmass:
 
     @pytest.mark.asyncio
     async def test_successful_run(self):
-        """Successful Amass run should parse JSONL and return results."""
-        amass_jsonl = "\n".join([
-            json.dumps({"name": "sub1.example.com", "addresses": [{"ip": "1.2.3.4"}]}),
-            json.dumps({"name": "sub2.example.com", "addresses": [{"ip": "5.6.7.8"}]}),
+        """Successful Amass run should parse v4 graph-format and return results."""
+        amass_output = "\n".join([
+            "sub1.example.com (FQDN) --> a_record --> 1.2.3.4 (IPAddress)",
+            "sub2.example.com (FQDN) --> a_record --> 5.6.7.8 (IPAddress)",
         ])
         docker = AsyncMock()
         docker.exec_in_container = AsyncMock(return_value=(0, "completed"))
-        docker.read_file_from_container = AsyncMock(return_value=amass_jsonl)
+        docker.read_file_from_container = AsyncMock(return_value=amass_output)
         emitter = AsyncMock(spec=EventEmitter)
         emitter.emit = AsyncMock()
 
@@ -176,14 +176,14 @@ class TestRunPhaseRecon:
             "ips": ["1.2.3.4"],
             "emails": ["user@example.com"],
         })
-        amass_jsonl = json.dumps({"name": "sub2.example.com", "addresses": [{"ip": "5.6.7.8"}]})
+        amass_output = "sub2.example.com (FQDN) --> a_record --> 5.6.7.8 (IPAddress)"
         dnsx_output = json.dumps({"host": "sub1.example.com", "a": ["1.2.3.4"]})
 
         # Set up sequential return values for read_file_from_container
         docker.read_file_from_container = AsyncMock(
             side_effect=[
                 harvester_json,  # theHarvester output
-                amass_jsonl,  # Amass output
+                amass_output,  # Amass output (v4 graph format)
                 dnsx_output,  # dnsx output
             ]
         )
@@ -232,11 +232,11 @@ class TestRunPhaseRecon:
 
         docker.exec_in_container = AsyncMock(side_effect=mock_exec)
 
-        # Amass succeeds
-        amass_jsonl = json.dumps({"name": "sub1.example.com", "addresses": [{"ip": "1.2.3.4"}]})
+        # Amass succeeds (v4 graph format)
+        amass_output = "sub1.example.com (FQDN) --> a_record --> 1.2.3.4 (IPAddress)"
         docker.read_file_from_container = AsyncMock(
             side_effect=[
-                amass_jsonl,  # Amass output
+                amass_output,  # Amass output (v4 graph format)
                 "",  # dnsx (empty)
             ]
         )
